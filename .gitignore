@@ -1,0 +1,81 @@
+.vscode
+
+# T-Display-S3 UniFi monitor build and local configuration
+examples/ikuai_widget/.pio/
+examples/ikuai_widget/managed_components/
+examples/ikuai_widget/sdkconfig.*
+!examples/ikuai_widget/sdkconfig.defaults
+examples/ikuai_widget/src/config.h
+examples/ikuai_widget/src/ikuai_cert.h
+
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+.pio
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+build
+script
+
+# UniFi credentials and private trust configuration
+examples/ikuai_widget/src/unifi_config.h
+examples/ikuai_widget/src/unifi_cert.h
+
+# Local tools and artifacts containing credentials
+.DS_Store
+.reasonix/
+.em_skill.json
+plans/
+__pycache__/
+*.bin
+*.log
+*.pem
+*.key
+.env
+.env.*

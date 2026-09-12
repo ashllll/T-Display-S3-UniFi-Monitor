@@ -392,14 +392,14 @@ static void record_ping(float ms) {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
     xSemaphoreTake(s_mux, portMAX_DELAY);
     if (!s_network_changed) {
-        int last = (s_ping_history.head + UNIFI_CURVE_MAX - 1) % UNIFI_CURVE_MAX;
+        int last = (s_ping_history.head + UNIFI_PING_MAX - 1) % UNIFI_PING_MAX;
         if (s_ping_history.n && now - s_ping_history.ts[last] > UNIFI_PING_MAX_AGE_SEC)
             memset(&s_ping_history, 0, sizeof(s_ping_history));
         int h = s_ping_history.head;
         s_ping_history.ms[h] = ms;
         s_ping_history.ts[h] = now;
-        s_ping_history.head = (h + 1) % UNIFI_CURVE_MAX;
-        if (s_ping_history.n < UNIFI_CURVE_MAX) s_ping_history.n++;
+        s_ping_history.head = (h + 1) % UNIFI_PING_MAX;
+        if (s_ping_history.n < UNIFI_PING_MAX) s_ping_history.n++;
     }
     xSemaphoreGive(s_mux);
 }
@@ -556,7 +556,7 @@ bool unifi_get_ping(unifi_ping_t *out) {
     if (!s_network_changed) *out = s_ping_history;
     xSemaphoreGive(s_mux);
     if (!out->n) return false;
-    int last = (out->head + UNIFI_CURVE_MAX - 1) % UNIFI_CURVE_MAX;
+    int last = (out->head + UNIFI_PING_MAX - 1) % UNIFI_PING_MAX;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
     return now - out->ts[last] <= UNIFI_PING_MAX_AGE_SEC;
 }

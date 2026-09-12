@@ -23,6 +23,7 @@ LV_FONT_DECLARE(ui_font_lato_20);
 #define RED 0xE67E80
 #define VIEWS 5
 #define WINDOW_SEC 120
+_Static_assert(UNIFI_CURVE_MAX > WINDOW_SEC, "1 Hz history must cover the full chart window");
 static const char *titles[VIEWS]={"Overview","Devices","Clients","Traffic","Console"};
 static lv_obj_t *pages[VIEWS],*nav[VIEWS],*nav_icon[VIEWS],*title,*footer,*status;
 static lv_obj_t *hero_name,*hero_model,*hero_state,*counts[2],*overview_rates[2];
@@ -34,7 +35,8 @@ static int selected;
 static uint32_t last_chart_ts;
 static bool last_chart_valid;
 static unifi_curve_t animation_curve;
-static int32_t animation_scale=1000;
+static int32_t animation_scale=1000,scale_target=1000;
+static uint32_t scale_tick_ms;
 typedef struct {lv_obj_t *obj,*empty;lv_chart_series_t *rx,*tx;} activity_t;
 static activity_t mini,traffic;
 
@@ -227,11 +229,22 @@ void unifi_view_refresh(uint32_t now_ms,bool wifi,const char *local_ip){
     bool history=rate && unifi_get_curve(&c);
     if(c.ts!=last_chart_ts || history!=last_chart_valid){
         uint32_t peak=1000;
-        for(int i=0;i<c.n;i++){uint32_t v=(uint64_t)(c.down[i]>c.up[i]?c.down[i]:c.up[i])*8/1000;if(v>peak)peak=v;}
-        int32_t scale=(int32_t)(ceil(peak/1000.0)*1000);
-        animation_curve=c;animation_scale=scale;
-        render_activity(&mini,&c,now_ms,scale,history);render_activity(&traffic,&c,now_ms,scale,history);
-        if(history)snprintf(b,sizeof(b),"%.0f Mbps",scale/1000.0);else strcpy(b,"-- Mbps");text(traffic_scale,b);
+        for(int i=0;i<c.n;i++){
+            uint32_t stamp=c.sample_ts[i];
+            if(stamp>now || now-stamp>WINDOW_SEC)continue;
+            uint32_t v=(uint64_t)(c.down[i]>c.up[i]?c.down[i]:c.up[i])*8/1000;
+            if(v>peak)peak=v;
+        }
+        // Leave headroom; grow immediately to avoid clipping a new peak.
+        // Shrink only below half scale, then ease down rather than moving all
+        // historical vertices abruptly when a peak leaves the visible window.
+        int32_t desired=(int32_t)(ceil(peak*1.2/1000.0)*1000);
+        if(!last_chart_valid || !history || desired>animation_scale)
+            animation_scale=scale_target=desired;
+        else if(desired<=animation_scale/2 || desired>scale_target)scale_target=desired;
+        animation_curve=c;scale_tick_ms=now_ms;
+        render_activity(&mini,&c,now_ms,animation_scale,history);render_activity(&traffic,&c,now_ms,animation_scale,history);
+        if(history)snprintf(b,sizeof(b),"%.1f Mbps",animation_scale/1000.0);else strcpy(b,"-- Mbps");text(traffic_scale,b);
         last_chart_ts=c.ts;last_chart_valid=history;
     }
     text(system_name,inv?e.selected_model:"Console");snprintf(b,sizeof(b),"Firmware %s",inv && e.version_valid?e.version:"--");text(system_version,b);
@@ -246,7 +259,7 @@ void unifi_view_refresh(uint32_t now_ms,bool wifi,const char *local_ip){
     else if(selected==2){if(clients)snprintf(b,sizeof(b),"%d shown / %lu connected",e.client_cnt,(unsigned long)e.online_count);else strcpy(b,"Client list unavailable");}
     else if(selected==3)snprintf(b,sizeof(b),"Uplink RX / TX  |  Live");
     else if(selected==4)snprintf(b,sizeof(b),"Console  %s",inv?e.selected_ip:"--");
-    else if(unifi_get_ping(&ping)){int i=(ping.head+UNIFI_CURVE_MAX-1)%UNIFI_CURVE_MAX;if(ping.ms[i]<0)strcpy(b,"Local gateway / no reply");else snprintf(b,sizeof(b),"Local gateway  %.0f ms",(double)ping.ms[i]);}
+    else if(unifi_get_ping(&ping)){int i=(ping.head+UNIFI_PING_MAX-1)%UNIFI_PING_MAX;if(ping.ms[i]<0)strcpy(b,"Local gateway / no reply");else snprintf(b,sizeof(b),"Local gateway  %.0f ms",(double)ping.ms[i]);}
     else snprintf(b,sizeof(b),"Device uplink  |  Live");
     (void)local_ip;
     text(footer,b);
@@ -255,8 +268,16 @@ void unifi_view_step(int direction){select_view((selected+direction+VIEWS)%VIEWS
 void unifi_view_home(void){select_view(0);}
 int unifi_view_page(void){return selected;}
 
-// Animate time position only; values remain actual API samples.
+// Animate time position and axis shrink; values remain actual API samples.
 void unifi_view_animate(uint32_t now_ms){
+    uint32_t dt=now_ms>=scale_tick_ms?now_ms-scale_tick_ms:0;
+    scale_tick_ms=now_ms;
+    if(last_chart_valid && animation_scale>scale_target && dt){
+        if(dt>1000)dt=1000;
+        int32_t step=(int64_t)(animation_scale-scale_target)*dt/2000;
+        animation_scale-=step?step:1;
+        char b[32];snprintf(b,sizeof(b),"%.1f Mbps",animation_scale/1000.0);text(traffic_scale,b);
+    }
     if(last_chart_valid && (selected==0 || selected==3))
         render_activity(selected==0?&mini:&traffic,&animation_curve,now_ms,animation_scale,true);
 }

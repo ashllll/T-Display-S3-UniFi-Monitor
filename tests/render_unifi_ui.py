@@ -49,7 +49,7 @@ int main(void){
  strcpy(extra.devices[1].name,"AC Pro");strcpy(extra.devices[1].model,"AC Pro");strcpy(extra.devices[1].state,"ONLINE");extra.devices[1].access_point=true;
  const char *names[]={"MacBook Pro","Living room TV","Workstation"};
  for(int i=0;i<3;i++){strcpy(extra.client[i].name,names[i]);snprintf(extra.client[i].ip,sizeof(extra.client[i].ip),"192.0.2.%d",i+4);strcpy(extra.client[i].interface,i?"WIRED":"WIRELESS");}
- history.n=60;history.head=0;history.ts=200;
+ history.n=60;history.head=60%UNIFI_CURVE_MAX;history.ts=200;
  for(int i=0;i<60;i++){history.sample_ts[i]=82+i*2;history.down[i]=(uint32_t)(350000+180000*sinf(i*.19)+75000*cosf(i*.71));history.up[i]=(uint32_t)(130000+60000*cosf(i*.26)+30000*sinf(i*.66));}
  for(int page=0;page<VIEWS;page++){
   unifi_view_refresh(200000,true,"192.0.2.9");lv_obj_update_layout(lv_screen_active());check_bounds(lv_screen_active());
@@ -96,6 +96,63 @@ int main(void){
    last_x=p0.x;
   }
  }
+
+ // Real 1 Hz acquisition, not the old 60 points at 2 s fixture: fill and wrap
+ // the ring repeatedly. Both chart widths must retain the full 120 s span.
+ history=(unifi_curve_t){0};
+ int landmark_last[2]={INT32_MAX,INT32_MAX};
+ for(uint32_t stamp=300;stamp<=600;stamp++){
+  int h=history.head;history.sample_ts[h]=stamp;
+  history.down[h]=100000+(stamp%7)*1000;history.up[h]=50000;
+  history.head=(h+1)%UNIFI_CURVE_MAX;
+  if(history.n<UNIFI_CURVE_MAX)history.n++;
+  history.ts=stamp;
+  if(stamp<430)continue;
+  unifi_view_refresh(stamp*1000,true,"192.0.2.9");
+  for(int chart_id=0;chart_id<2;chart_id++){
+   unifi_view_home();if(chart_id)unifi_view_step(3);
+   activity_t *a=chart_id?&traffic:&mini;
+   int last_x=INT32_MAX;
+   for(uint32_t offset=0;offset<1000;offset+=50){
+    unifi_view_animate(stamp*1000+offset);
+    int32_t *xs=lv_chart_get_x_array(a->obj,a->rx);
+    int32_t *ys=lv_chart_get_y_array(a->obj,a->rx);
+    int first=-1,last=-1;int tracked_x=INT32_MAX;
+    for(int j=0;j<history.n;j++){
+     if(ys[j]==LV_CHART_POINT_NONE)continue;
+     if(first<0)first=j;last=j;
+     int slot=(history.head-history.n+j+UNIFI_CURVE_MAX)%UNIFI_CURVE_MAX;
+     if(history.sample_ts[slot]==stamp-30)tracked_x=xs[j];
+     if(history.sample_ts[slot]==450 && stamp<=560){
+      assert(xs[j]<=landmark_last[chart_id]);landmark_last[chart_id]=xs[j];
+     }
+    }
+    assert(first>=0 && xs[first]<=3);
+    assert(last>=0 && xs[last]>=lv_obj_get_content_width(a->obj)-3);
+    assert(tracked_x!=INT32_MAX && tracked_x<=last_x);
+    last_x=tracked_x;
+   }
+  }
+ }
+ unifi_view_home();unifi_view_step(3);snapshot("08-full-window.ppm");
+ // A departed peak must not snap the entire history vertically. Shrinking
+ // uses only visible samples and eases monotonically without overshoot.
+ history.n=2;history.head=2;history.ts=701;
+ history.sample_ts[0]=580;history.sample_ts[1]=700;
+ history.down[0]=history.up[0]=12500000;
+ history.down[1]=history.up[1]=100000;
+ unifi_view_refresh(700000,true,"192.0.2.9");
+ int old_scale=animation_scale;
+ history.ts=702;unifi_view_refresh(701000,true,"192.0.2.9");
+ assert(animation_scale==old_scale && scale_target<old_scale);
+ for(uint32_t tick=701050;tick<=706000;tick+=50){
+  int before=animation_scale;unifi_view_animate(tick);
+  assert(animation_scale<=before && animation_scale>=scale_target);
+  assert(before-animation_scale<=before/20+1);
+ }
+ assert(animation_scale<old_scale);
+
+
  puts("PASS: actual UniFi view, five-view navigation, bounds, empty/zero/stale states and timestamp/gap chart mapping");
 }
 '''

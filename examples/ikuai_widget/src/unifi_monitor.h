@@ -7,7 +7,8 @@
 // Internal throughput is bytes/sec; device uplink bit rates are divided by 8.
 // Missing fields are explicitly invalid. WAN definitions are not WAN health.
 
-#define UNIFI_CURVE_MAX 60
+// Retain the full 120-second chart at 1 Hz, including boundary samples.
+#define UNIFI_CURVE_MAX 128
 
 typedef enum {
     UNIFI_LINK_WAIT = 0,
@@ -39,7 +40,7 @@ typedef struct {
     bool ok;
     uint32_t ts;
     int head;                          // 下一个写入位置
-    int n;                             // 已填充点数（<= 60）
+    int n;                             // 已填充点数（<= UNIFI_CURVE_MAX）
     uint32_t sample_ts[UNIFI_CURVE_MAX];
     uint32_t down[UNIFI_CURVE_MAX];    // B/s
     uint32_t up[UNIFI_CURVE_MAX];      // B/s
@@ -48,11 +49,12 @@ typedef struct {
 // ICMP results have their own clock; HTTP failures must not drop probes.
 #define UNIFI_PING_MAX_AGE_SEC 3
 #define UNIFI_PING_WINDOW_SEC 60
+#define UNIFI_PING_MAX UNIFI_PING_WINDOW_SEC
 typedef struct {
     int head;
     int n;
-    float ms[UNIFI_CURVE_MAX];          // -1 is an actual timeout
-    uint32_t ts[UNIFI_CURVE_MAX];
+    float ms[UNIFI_PING_MAX];          // -1 is an actual timeout
+    uint32_t ts[UNIFI_PING_MAX];
 } unifi_ping_t;
 
 bool unifi_get_ping(unifi_ping_t *out);

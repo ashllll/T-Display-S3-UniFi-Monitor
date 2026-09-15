@@ -93,6 +93,14 @@ static esp_err_t on_http_evt(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
+// Only the polling task owns this handle, including recovery after Wi-Fi changes.
+static void discard_http_client(void) {
+    if (s_client) {
+        esp_http_client_cleanup(s_client);
+        s_client = NULL;
+    }
+}
+
 static bool api_get(const char *path, char *buf, int cap, int timeout_ms) {
     if (!config_valid()) { s_link_state = UNIFI_LINK_CONFIG_ERROR; return false; }
     if (esp_timer_get_time() / 1000 < s_retry_at_ms) {
@@ -121,15 +129,29 @@ static bool api_get(const char *path, char *buf, int cap, int timeout_ms) {
         esp_http_client_set_timeout_ms(s_client, timeout_ms) != ESP_OK ||
         esp_http_client_set_header(s_client, "X-API-Key", UNIFI_API_KEY) != ESP_OK ||
         esp_http_client_set_header(s_client, "Accept", "application/json") != ESP_OK) {
+        discard_http_client();
         s_link_state = UNIFI_LINK_HTTP_ERROR; return false;
     }
     esp_err_t err = esp_http_client_perform(s_client);
     if (err != ESP_OK) {
-        s_link_state = err == ESP_ERR_TIMEOUT ? UNIFI_LINK_TIMEOUT : UNIFI_LINK_NETWORK_ERROR;
+        // IDF can leave a timed-out request waiting for its old response headers.
+        // Recreate it so the next attempt actually sends a fresh GET.
+        discard_http_client();
+        s_link_state = err == ESP_ERR_TIMEOUT || err == ESP_ERR_HTTP_EAGAIN ?
+                       UNIFI_LINK_TIMEOUT : UNIFI_LINK_NETWORK_ERROR;
         ESP_LOGW(TAG, "GET failed: %s", esp_err_to_name(err));
         return false;
     }
-    if (s_network_changed) { s_link_state = UNIFI_LINK_NETWORK_ERROR; return false; }
+    if (s_network_changed) {
+        discard_http_client();
+        s_link_state = UNIFI_LINK_NETWORK_ERROR; return false;
+    }
+    if (!esp_http_client_is_complete_data_received(s_client)) {
+        discard_http_client();
+        s_link_state = UNIFI_LINK_HTTP_ERROR;
+        ESP_LOGW(TAG, "GET incomplete response");
+        return false;
+    }
     int status = esp_http_client_get_status_code(s_client);
     if (status != 200 || !s_resp.len || s_resp.truncated) {
         s_link_state = status == 401 || status == 403 ? UNIFI_LINK_AUTH_ERROR :
@@ -388,10 +410,10 @@ static bool parse_wan(const char *resp) {
 
 static esp_ping_handle_t s_ping = NULL;
 
-static void record_ping(float ms) {
+static void record_ping(esp_ping_handle_t session, float ms) {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
     xSemaphoreTake(s_mux, portMAX_DELAY);
-    if (!s_network_changed) {
+    if (session == s_ping && !s_network_changed) {
         int last = (s_ping_history.head + UNIFI_PING_MAX - 1) % UNIFI_PING_MAX;
         if (s_ping_history.n && now - s_ping_history.ts[last] > UNIFI_PING_MAX_AGE_SEC)
             memset(&s_ping_history, 0, sizeof(s_ping_history));
@@ -407,11 +429,11 @@ static void record_ping(float ms) {
 static void on_ping_success(esp_ping_handle_t hdl, void *args) {
     uint32_t t = 0;
     esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &t, sizeof(t));
-    record_ping((float)t);
+    record_ping(hdl, (float)t);
 }
 
 static void on_ping_timeout(esp_ping_handle_t hdl, void *args) {
-    record_ping(-1);
+    record_ping(hdl, -1);
 }
 
 static bool ping_start(void) {
@@ -430,8 +452,18 @@ static bool ping_start(void) {
         .on_ping_success = on_ping_success,
         .on_ping_timeout = on_ping_timeout,
     };
-    if (esp_ping_new_session(&cfg, &cbs, &s_ping) == ESP_OK) {
-        esp_ping_start(s_ping);
+    esp_ping_handle_t session = NULL;
+    if (esp_ping_new_session(&cfg, &cbs, &session) == ESP_OK) {
+        xSemaphoreTake(s_mux, portMAX_DELAY);
+        s_ping = session;
+        xSemaphoreGive(s_mux);
+        if (esp_ping_start(session) != ESP_OK) {
+            xSemaphoreTake(s_mux, portMAX_DELAY);
+            s_ping = NULL;
+            xSemaphoreGive(s_mux);
+            esp_ping_delete_session(session);
+            return false;
+        }
         ESP_LOGI(TAG, "ping started (1s interval)");
         return true;
     }
@@ -447,12 +479,17 @@ static void poll_task(void *arg) {
     int64_t next=0,next_ext=0;unsigned failures=0;int slot=0;
     for(;;) {
         if(s_network_changed) {
-            if(s_ping){esp_ping_stop(s_ping);esp_ping_delete_session(s_ping);s_ping=NULL;}
+            discard_http_client();
             xSemaphoreTake(s_mux,portMAX_DELAY);
+            // Retire the identity before asynchronous stop/delete. An old
+            // in-flight callback must not enter the next network's history.
+            esp_ping_handle_t retired = s_ping;
+            s_ping = NULL;
             memset(&s_ping_history,0,sizeof(s_ping_history));
             memset(&s_extra,0,sizeof(s_extra));memset(&s_curve,0,sizeof(s_curve));
             s_network_changed=false;
             xSemaphoreGive(s_mux);
+            if(retired){esp_ping_stop(retired);esp_ping_delete_session(retired);}
             mark_system_sample_failed();s_site[0]=s_device[0]=s_heartbeat[0]=0;
             next=next_ext=0;failures=0;
         }
@@ -520,9 +557,9 @@ void unifi_monitor_start(void) {
 }
 
 void unifi_monitor_network_changed(void) {
-    s_network_changed = true;
-    if (!s_mux) return;
+    if (!s_mux) { s_network_changed = true; return; }
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    s_network_changed = true;
     memset(&s_ping_history, 0, sizeof(s_ping_history));
     s_sys.ok = false;
     memset(&s_extra, 0, sizeof(s_extra));

@@ -52,7 +52,7 @@ static volatile bool s_wifi_ok;
 static volatile uint8_t s_wifi_retry_count;
 static esp_timer_handle_t s_wifi_retry_timer;
 static bool s_night_dim;
-static uint32_t s_last_key_ms;
+static uint64_t s_last_key_ms;
 static size_t internal_heap_free(void){return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);}
 #if !APP_DEMO_MODE
 static void wifi_retry_cb(void *arg) {
@@ -139,10 +139,10 @@ static void night_dim_poll(void) {
     }
 }
 
-typedef struct {gpio_num_t pin;int stable,last_raw;uint32_t changed_ms;} page_button_t;
+typedef struct {gpio_num_t pin;int stable,last_raw;uint64_t changed_ms;} page_button_t;
 #define BUTTON_DEBOUNCE_MS 30
 static page_button_t s_btn_prev={.pin=GPIO_NUM_0},s_btn_next={.pin=GPIO_NUM_14};
-static bool button_pressed(page_button_t *button, uint32_t now) {
+static bool button_pressed(page_button_t *button, uint64_t now) {
     int raw = gpio_get_level(button->pin);
     if (raw != button->last_raw) {
         button->last_raw = raw;
@@ -157,19 +157,19 @@ static bool button_pressed(page_button_t *button, uint32_t now) {
 
 
 static void buttons_poll(void){
-    uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
+    uint64_t now=(uint64_t)(esp_timer_get_time()/1000);
     bool prev=button_pressed(&s_btn_prev,now),next=button_pressed(&s_btn_next,now);
     if(prev==next)return;
     s_last_key_ms=now;unifi_view_step(prev?-1:1);
     unifi_view_refresh(now,s_wifi_ok,s_ip);
 }
 static void ui_timer_cb(lv_timer_t *timer){
-    (void)timer;uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
+    (void)timer;uint64_t now=(uint64_t)(esp_timer_get_time()/1000);
     if(unifi_view_page()!=0 && s_last_key_ms && now-s_last_key_ms>60000)unifi_view_home();
     unifi_view_refresh(now,s_wifi_ok,s_ip);night_dim_poll();
 }
 static void animation_timer_cb(lv_timer_t *timer){
-    (void)timer;unifi_view_animate((uint32_t)(esp_timer_get_time()/1000));
+    (void)timer;unifi_view_animate((uint64_t)(esp_timer_get_time()/1000));
 }
 static void lv_tick_cb(void *arg) { lv_tick_inc(1); }
 
@@ -183,7 +183,7 @@ static void ui_task(void *arg) {
     gpio_config(&btn);
     s_btn_prev.stable=s_btn_prev.last_raw=gpio_get_level(s_btn_prev.pin);
     s_btn_next.stable=s_btn_next.last_raw=gpio_get_level(s_btn_next.pin);
-    s_btn_prev.changed_ms=s_btn_next.changed_ms=(uint32_t)(esp_timer_get_time()/1000);
+    s_btn_prev.changed_ms=s_btn_next.changed_ms=(uint64_t)(esp_timer_get_time()/1000);
     // Render the initial black/background frame while the backlight is still
     // off, then enable it only after the i80 transfer has completed.
     lv_refr_now(lv_display_get_default());

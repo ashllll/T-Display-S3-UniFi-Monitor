@@ -33,7 +33,12 @@ stubs = r'''
 #define HTTP_TIMEOUT_MS 5000
 #define pdMS_TO_TICKS(x) (x)
 static int s_mux = 1;
-static void *s_ping;
+typedef void *esp_ping_handle_t;
+static esp_ping_handle_t s_ping;
+#define ESP_PING_PROF_TIMEGAP 0
+static void esp_ping_get_profile(void *h, int kind, void *out, size_t size) {
+    (void)h; (void)kind; (void)size; *(uint32_t *)out = 12;
+}
 static bool s_network_changed;
 static unifi_sys_t s_sys;
 static unifi_extra_t s_extra;
@@ -42,6 +47,8 @@ static unifi_link_state_t s_link_state;
 static int64_t now_ms, s_retry_at_ms;
 static char s_site[37], s_device[37], s_heartbeat[40];
 static unifi_curve_t s_curve;
+static int http_discards;
+static void discard_http_client(void){http_discards++;}
 static bool config_valid(void){return true;}
 static bool parse_sites(const char *s){(void)s;strcpy(s_site,"site");return true;}
 static int64_t esp_timer_get_time(void) { return now_ms * 1000; }
@@ -50,7 +57,13 @@ static void *scratch;
 static void *heap_caps_malloc(size_t n, int caps) { (void)caps; return scratch = malloc(n); }
 static void vTaskDelete(void *arg) { (void)arg; abort(); }
 static void vTaskDelay(int ticks) { now_ms += ticks; if (now_ms >= 65000) longjmp(done, 1); }
-static void esp_ping_stop(void *h) { (void)h; }
+static void on_ping_timeout(esp_ping_handle_t hdl, void *args);
+static void esp_ping_stop(void *h) {
+    // Execute an old callback inside the actual poll-task retirement path.
+    assert(s_ping != h);
+    on_ping_timeout(h, NULL);
+    assert(!s_ping_history.n);
+}
 static void esp_ping_delete_session(void *h) { (void)h; }
 static bool ping_start(void) { s_ping = &s_mux; return true; }
 bool unifi_recently_ok(void) { return s_sys.ok; }
@@ -85,34 +98,51 @@ static bool poll_devices(char *buf,int cap){
 '''
 code = stubs + '\n'.join(function(monitor, sig) for sig in [
     'static void mark_system_sample_failed(', 'static void record_ping(',
+    'static void on_ping_success(', 'static void on_ping_timeout(',
     'void unifi_monitor_network_changed(', 'bool unifi_get_ping(', 'static void poll_task('])
 
 code += r'''
 int main(void) {
     unifi_ping_t p;
+    s_ping = &s_mux;
     now_ms = 10000;
     assert(!unifi_get_ping(&p));
     // No HTTP samples at all: all ten ICMP results still enter the ring.
     for (int i = 0; i < 10; i++) {
         now_ms = 10000 + i * 1000;
-        record_ping(i == 4 ? -1 : 10);
+        record_ping(s_ping, i == 4 ? -1 : 10);
     }
     assert(unifi_get_ping(&p) && p.n == 10 && !s_sys.ok);
     now_ms = 22000;
     assert(unifi_get_ping(&p));
     now_ms = 23000;
     assert(!unifi_get_ping(&p));
-    record_ping(25);
+    record_ping(s_ping, 25);
     assert(unifi_get_ping(&p) && p.n == 1 && p.ms[0] == 25);
     unifi_monitor_network_changed();
     assert(!unifi_get_ping(&p) && !p.n);
-    record_ping(12); // Late callback from the old network is ignored.
+    record_ping(s_ping, 12); // Late callback from the old network is ignored.
     assert(!s_ping_history.n);
+    // Stop/delete is asynchronous: old success and timeout callbacks may
+    // arrive after the flag is cleared, both before and after a new session.
+    esp_ping_handle_t retired = s_ping;
+    s_ping = NULL;
     s_network_changed = false;
-    for (int i = 0; i < 70; i++) { now_ms += 1000; record_ping(i); }
+    on_ping_success(retired, NULL); on_ping_timeout(retired, NULL);
+    assert(!unifi_get_ping(&p) && !p.n);
+    s_ping = &s_curve;
+    on_ping_success(retired, NULL); on_ping_timeout(retired, NULL);
+    assert(!unifi_get_ping(&p) && !p.n);
+    on_ping_success(s_ping, NULL);
+    assert(unifi_get_ping(&p) && p.n == 1 && p.ms[0] == 12);
+    on_ping_timeout(s_ping, NULL);
+    assert(unifi_get_ping(&p) && p.n == 2 && p.ms[1] == -1);
+    memset(&s_ping_history, 0, sizeof(s_ping_history));
+    for (int i = 0; i < 70; i++) { now_ms += 1000; record_ping(s_ping, i); }
     assert(unifi_get_ping(&p) && p.n == 60 && p.ms[(p.head+59)%60] == 69);
     for (scenario = 0; scenario < 3; scenario++) {
         now_ms = 1000; request_count = 0; s_sys.ok = false;
+        s_network_changed = true;
         s_site[0]=s_device[0]=0;s_retry_at_ms=0;
         s_link_state = UNIFI_LINK_WAIT;
         if (!setjmp(done)) poll_task(NULL);
@@ -131,6 +161,7 @@ int main(void) {
             } else if(r.kind==1 || r.kind==2){extensions++;assert(r.timeout==5000);}
         }
         assert(main_count>0);
+        assert(http_discards > 0);
         if(scenario==1)assert(!extensions && main_count<6);
         else assert(extensions>0);
     }

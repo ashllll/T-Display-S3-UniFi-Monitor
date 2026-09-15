@@ -17,9 +17,23 @@
 
 上联流量不等于 WAN 吞吐，API 可达不代表互联网正常。设备和客户端列表各显示最多三项，客户端列表不是流量排行。更多语义见[固件说明](examples/ikuai_widget/README.md)。
 
+## 界面与数据含义
+
+| 页面 | 显示内容 | 使用边界 |
+|---|---|---|
+| Overview | 选定设备名称/型号、设备与客户端数量、上联 RX/TX、活动小曲线 | 概览中的网关延迟来自开发板 DHCP 网关 ICMP |
+| Devices | 最多三行设备名称、型号与在线状态 | 总数与可见行数不同；设备清单分页完成后才更新 |
+| Clients | 最多三个客户端的名称、IP、连接方式及总数 | API 返回顺序，不是流量排行 |
+| Traffic | RX/TX 速率、最近 120 秒双曲线及纵轴刻度 | RX/TX 是选定设备上联，不保证等于互联网出口吞吐 |
+| Console | CPU、内存、运行时间、1/5/15 分钟负载、固件和地址 | 未提供或过期的字段显示 `--` |
+
+速率使用十进制 **kbps / Mbps / Gbps**。API 的 `uplink.rxRateBps` 和 `txRateBps` 按比特/秒解释，内部缓存换算为字节/秒，显示时再乘 8。有效零值显示为 `0`，不会将缺失值当成零。
+
+按键 GPIO0 上一页、GPIO14 下一页，30 ms 消抖，60 秒无操作返回 Overview。界面每 100 ms 检查数据，曲线每 50 ms 按真实时间滚动；动画刷新率不是 API 采样率。128 个历史点支持 1 Hz 下的完整两分钟窗口；刚启动需积累数据，超过 10 秒断采保留断线。统一整数滚动偏移保持历史线段形状，纵轴缩小时渐变，64 位毫秒时钟避免约 49.7 天运行后的回绕跳动。
+
 ## 1. 安装工具并获取源码
 
-安装 Git 和 [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)，或使用 VS Code 的 PlatformIO IDE 终端。首次构建需联网下载工具链、ESP-IDF 和 LVGL。
+安装 Git 和 [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)，或使用 VS Code 的 PlatformIO IDE 终端。首次构建需联网下载工具链、ESP-IDF 和 LVGL。当前环境固定为 PlatformIO `espressif32@6.7.0`、ESP-IDF 5.2.1、LVGL 9.2.2；目标为 `t-display-s3`，不使用 Arduino 框架。
 
 ```bash
 git clone https://github.com/ashllll/T-Display-S3-UniFi-Monitor.git
@@ -77,6 +91,33 @@ UUID 不是 MAC、IP、云控制台 ID 或 `default`。留空仅在唯一站点�
 
 固件只发 GET 请求，但密钥权限由 UniFi 账号/角色决定。使用满足读取需要的最低权限，并设置合适的有效期。
 
+## API 接口与采集调度
+
+所有请求使用 HTTPS、`X-API-Key` 和 `Accept: application/json`，统一前缀为 `/proxy/network/integration/v1`。固件不登录、不使用 Cookie、不发送修改配置的请求，也不自动跟随重定向。
+
+| GET 路径（省略统一前缀） | 读取内容 | 调度 |
+|---|---|---|
+| `/sites?offset=0&limit=2` | 站点 UUID | 未指定站点时发现；必须唯一 |
+| `/sites/{siteId}/devices` | 分页设备、所选设备信息与 AP 数量 | 初始化及扩展轮转；最多 1000 项 |
+| `/sites/{siteId}/devices/{deviceId}/statistics/latest` | CPU/内存、负载、运行时间、上联速率、心跳 | 成功时按请求开始时间每 1 秒调度 |
+| `/sites/{siteId}/clients?offset=0&limit=3` | 前三项客户端及 `totalCount` | 扩展轮转 |
+| `/sites/{siteId}/wans?offset=0&limit=2` | 最多两条 WAN 配置名称 | 扩展轮转；不是实时 WAN 健康 |
+
+每 5 秒轮转一个扩展源，三个源约 15 秒轮转一遍，网络耗时会延长周期。请求串行执行，不积压并发请求。控制台生成新统计的速度可能慢于轮询速度，重复读取不保证获得新速率。
+
+| 有效性 | 时间边界 |
+|---|---|
+| 主统计 | 最近成功采集不足 10 秒 |
+| 扩展列表 | 各来源独立计时，30 秒过期 |
+| 控制台心跳 | 90 秒；HTTP 成功但心跳陈旧也不能当作新数据 |
+| DHCP 网关 Ping | 每秒独立采样，保留 60 点，超过 3 秒无结果视为过期 |
+
+### 断线与超时恢复
+
+主统计失败按 4、8、16、32 秒退避，恢复成功后回到 1 秒调度。HTTP 设置失败、传输错误或响应体不完整时销毁旧客户端，下一次尝试重新建立连接并发送 GET，避免一直等待旧请求的响应头。`ESP_ERR_HTTP_EAGAIN` 按超时处理。每次重建仍保留 TLS 证书与名称验证。
+
+网络切换由采集任务清理 HTTP 客户端、旧 Ping 会话、历史和发现结果，再重新发现/采集；旧 Ping 回调不能写入新网络的历史。HTTP 429 遵守数字 `Retry-After`（最多 300 秒；缺少有效值时 30 秒），重建连接不会绕过限流。socket 超时设为 5 秒，这不是整个事务的硬截止时间。
+
 ## 4. 配置 TLS 信任
 
 默认使用 ESP-IDF 公共 CA 证书包，始终验证证书名称。私有 CA/自签证书需从可信管理渠道取得并核对，随后写入本地 `examples/ikuai_widget/src/unifi_cert.h`。只放证书，不放私钥：
@@ -117,6 +158,7 @@ pio device monitor -b 115200 -p PORT
 | HTTP 404 | 控制台版本、UUID、API 前缀；独立 Network Server 可能需要修改代码中的 UniFi OS 前缀 |
 | TLS/网络错误 | 时间同步、证书链与 SAN、DNS、端口、网络可达性 |
 | HTTP 429 | 等待 Retry-After 退避，不要加快轮询 |
+| 断线后暂未恢复 | 等待退避或 429 冷却；仍失败时核对 Wi-Fi、TLS、Key 和控制台可达性，客户端会在传输失败后重建 |
 | 曲线不变 | 控制台统计更新可能慢于 1 秒轮询；动画不代表新数据 |
 | 屏幕暗 | 供电、GPIO15、复位日志、夜间背光 |
 
@@ -136,10 +178,22 @@ pio device monitor -b 115200 -p PORT
 ```bash
 python3 tests/test_system_health_parser.py
 python3 tests/test_telemetry_timing.py
+python3 tests/test_http_recovery.py
 python3 tests/render_unifi_ui.py
 ```
 
-解析测试使用 SDK cJSON 与 ASan/UBSan；时序测试模拟网络与时间；UI 测试编译实际 LVGL 代码，检查导航、布局、过期状态和图表采样时间。渲染写入 `/tmp/unifi-console-render`，不读取个人 API Key。
+解析测试使用 SDK cJSON 与 ASan/UBSan；时序测试模拟网络与时间；UI 测试编译实际 LVGL 代码，检查导航、布局、过期状态和图表采样时间。HTTP 回归测试覆盖响应头超时后重新发送 GET、不完整响应、网络切换、配置请求失败、正常连接复用、认证与 429 冷却。渲染写入 `/tmp/unifi-console-render`，不读取个人 API Key。
+
+## 发布与验证记录
+
+2026-09-16：恢复测试、解析测试和时序测试通过；修复固件在 T-Display-S3 上通过 USB-JTAG 烧录校验。启动后 Wi-Fi 与 API 在线，连续 10 秒观察到成功采集时间推进。**这不等于完成真实断网恢复的实机验收**；本轮未取得新的相机截图，长期断线恢复和屏幕动画仍应按下列流程核验。
+
+1. 正常启动，核对五页、数据含义和按键；Traffic 等待两分钟积累历史。
+2. 在可控测试环境短暂阻断开发板到控制台的连接，确认旧数据变为不可用。
+3. 恢复连接，等待退避/限流结束，确认无需重启即可重新采集；分别覆盖超时、Wi-Fi 重连和 API 重启。
+4. 观察新采样从右侧进入、历史向左移动，真实断采有缺口，纵轴缓慢缩小；不要仅凭一张静态图判断逐帧抖动。
+
+后续源码提交使用独立的发布目录：只同步明确的源码、模板、测试和文档；使用模板构建、扫描暂存内容及历史后再推送。开发目录保留个人配置与实机固件，发布目录不复制这些文件。详细变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 目录与许可
 

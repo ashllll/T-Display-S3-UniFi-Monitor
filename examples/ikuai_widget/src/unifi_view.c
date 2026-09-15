@@ -36,7 +36,7 @@ static uint32_t last_chart_ts;
 static bool last_chart_valid;
 static unifi_curve_t animation_curve;
 static int32_t animation_scale=1000,scale_target=1000;
-static uint32_t scale_tick_ms;
+static uint64_t scale_tick_ms;
 typedef struct {lv_obj_t *obj,*empty;lv_chart_series_t *rx,*tx;} activity_t;
 static activity_t mini,traffic;
 
@@ -169,7 +169,7 @@ static void format_rate(uint32_t bytes,char *out,size_t cap){
     else if(mbps>=1)snprintf(out,cap,"%.1f Mbps",mbps);
     else snprintf(out,cap,"%.0f kbps",mbps*1000);
 }
-static void render_activity(activity_t *a,const unifi_curve_t *c,uint32_t now_ms,int32_t scale,bool valid){
+static void render_activity(activity_t *a,const unifi_curve_t *c,uint64_t now_ms,int32_t scale,bool valid){
     uint32_t now=now_ms/1000;
     lv_obj_update_layout(a->obj);
     int32_t width=lv_obj_get_content_width(a->obj);
@@ -194,7 +194,7 @@ static void render_activity(activity_t *a,const unifi_curve_t *c,uint32_t now_ms
     else {lv_obj_remove_flag(a->empty,LV_OBJ_FLAG_HIDDEN);text(a->empty,valid?"Collecting history":"No recent data");}
     lv_chart_refresh(a->obj);
 }
-void unifi_view_refresh(uint32_t now_ms,bool wifi,const char *local_ip){
+void unifi_view_refresh(uint64_t now_ms,bool wifi,const char *local_ip){
     uint32_t now=now_ms/1000;
     unifi_sys_t s={0};unifi_extra_t e={0};unifi_curve_t c={0};unifi_ping_t ping={0};char b[100],r[32],t[32];
     bool live=unifi_get_sys(&s);bool extra=unifi_get_extra(&e);
@@ -269,8 +269,8 @@ void unifi_view_home(void){select_view(0);}
 int unifi_view_page(void){return selected;}
 
 // Animate time position and axis shrink; values remain actual API samples.
-void unifi_view_animate(uint32_t now_ms){
-    uint32_t dt=now_ms>=scale_tick_ms?now_ms-scale_tick_ms:0;
+void unifi_view_animate(uint64_t now_ms){
+    uint64_t dt=now_ms>=scale_tick_ms?now_ms-scale_tick_ms:0;
     scale_tick_ms=now_ms;
     if(last_chart_valid && animation_scale>scale_target && dt){
         if(dt>1000)dt=1000;

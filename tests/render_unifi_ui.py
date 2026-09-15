@@ -152,6 +152,38 @@ int main(void){
  }
  assert(animation_scale<old_scale);
 
+ // Cross the former 32-bit millisecond boundary with fresh real-second
+ // timestamps. Both charts, inventory and shrink animation must stay live.
+ const uint64_t boundary=UINT64_C(1)<<32;
+ for(uint64_t base=boundary-1000;base<=boundary*2+1000;base+=boundary+2000){
+  int last_x=INT32_MAX;
+  for(uint64_t tick=base;tick<=base+2000;tick+=50){
+   uint32_t stamp=tick/1000;
+   history=(unifi_curve_t){.n=121,.head=121,.ts=stamp};
+   for(int i=0;i<121;i++){
+    history.sample_ts[i]=stamp-120+i;history.down[i]=100000;history.up[i]=50000;
+   }
+   extra.device_ts=extra.clients_ts=extra.system_ts=stamp;
+   unifi_view_refresh(tick,true,"192.0.2.9");
+   assert(!strcmp(lv_label_get_text(counts[0]),"2"));
+   assert(!strcmp(lv_label_get_text(client_count),"23 total"));
+   for(int chart_id=0;chart_id<2;chart_id++){
+    unifi_view_home();if(chart_id)unifi_view_step(3);
+    activity_t *a=chart_id?&traffic:&mini;
+    unifi_view_animate(tick);
+    int32_t *ys=lv_chart_get_y_array(a->obj,a->rx);
+    int32_t *xs=lv_chart_get_x_array(a->obj,a->rx);
+    assert(ys[120]!=LV_CHART_POINT_NONE && xs[120]>=lv_obj_get_content_width(a->obj)-3);
+    assert(ys[1]!=LV_CHART_POINT_NONE && xs[1]<=3);
+   }
+   int slot=(base/1000-30)-(stamp-120);
+   int x=lv_chart_get_x_array(traffic.obj,traffic.rx)[slot];
+   assert(x<=last_x);last_x=x;
+  }
+ }
+ animation_scale=100000;scale_target=2000;scale_tick_ms=boundary-25;
+ unifi_view_animate(boundary+25);
+ assert(animation_scale==97550);
 
  puts("PASS: actual UniFi view, five-view navigation, bounds, empty/zero/stale states and timestamp/gap chart mapping");
 }

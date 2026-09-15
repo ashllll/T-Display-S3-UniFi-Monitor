@@ -1,6 +1,6 @@
 # T-Display-S3 — UniFi Network Console
 
-针对 320×170 屏幕重新构建的 UniFi 控制台。参考实际 Network 10.6.101 深色界面：左侧功能栏、Network 应用标题、设备图形与摘要、紧凑设备/客户端列表、独立流量活动视图及系统资源条。旧十页仪表、大数字焦点、双色速率分屏和逐帧滚动曲线已移除。
+针对 320×170 屏幕重新构建的 UniFi 控制台。参考实际 Network 10.6.101 深色界面：左侧功能栏、Network 应用标题、设备图形与摘要、紧凑设备/客户端列表、独立流量活动视图及系统资源条。界面围绕五个视图组织，流量曲线按实际时间平滑滚动。
 
 ![实际 LVGL 视图预览，匿名测试数据](../../designs/unifi-ui/preview.png)
 
@@ -21,7 +21,7 @@ GPIO0 上一页、GPIO14 下一页切换侧栏功能；30ms 消抖，按下响�
 ## 数据与显示
 
 - 仅使用官方 UniFi Network 本地 Integration API 的 GET 请求，不再使用 iKuai token、会话或字段。
-- 速率为选定设备的 `uplink.rxRateBps/txRateBps`，显示十进制 Kb/s、Mb/s、Gb/s，与 UniFi 网络速率语义一致。内部采集缓存仍保存 B/s。
+- 速率为选定设备的 `uplink.rxRateBps/txRateBps`，显示十进制 kbps、Mbps、Gbps，与 UniFi 网络速率语义一致。内部采集缓存仍保存 B/s。
 - 上联活动不宣称是 WAN 吞吐；控制台 API 连接成功不证明互联网连通。网关延迟是显示板实际 DHCP 网关的 ICMP 结果。
 - 官方接口未返回的温度、会话协议计数、WAN 实时健康、客户端流量排名不再占用界面。
 - 缺失数据为 `--`，有效零值为 `0`。列表过期显示不可用；没有虚构设备行。
@@ -60,8 +60,8 @@ GPIO0 上一页、GPIO14 下一页切换侧栏功能；30ms 消抖，按下响�
 
 ```bash
 # 在 examples/ikuai_widget 中，首次创建本地配置（不要覆盖已有文件）
-cp src/config.example.h src/config.h
-cp src/unifi_config.example.h src/unifi_config.h
+test -f src/config.h || cp src/config.example.h src/config.h
+test -f src/unifi_config.h || cp src/unifi_config.example.h src/unifi_config.h
 # 填入 Wi-Fi、UniFi API Key、站点/设备 ID；私有证书配置见上文
 pio run -e t-display-s3
 ```
@@ -70,6 +70,7 @@ pio run -e t-display-s3
 # 在仓库根目录执行
 python3 tests/test_system_health_parser.py
 python3 tests/test_telemetry_timing.py
+python3 tests/test_http_recovery.py
 python3 tests/render_unifi_ui.py
 ```
 
@@ -108,3 +109,11 @@ python3 tests/render_unifi_ui.py
 Traffic 采样说明：统计请求每 1 秒发起一次（请求变慢时不并发堆积），库存查询结束后及时恢复。控制台统计更新周期可能慢于轮询周期，重复请求不能保证获得每秒的新速率；50 ms 曲线动画不代表数据采样频率。
 
 2026-09-12 曲线修复：流量历史扩展为 128 点，覆盖 1 Hz 轮询下的完整 120 秒窗口；Ping 仍独立保留 60 点。纵轴仅按可见时间窗口计算峰值，留出余量；缩小时使用滞回与渐变，避免峰值离开窗口时整条曲线突然跳动。启动后需积累两分钟真实采样才能填满图框，真实断采仍保留空缺。
+
+## 2026-09-16：连接恢复与长时间运行
+
+HTTP 设置/传输失败以及不完整响应会销毁旧客户端，下次重试重新建立 TLS 连接并发送 GET。响应头超时的 `ESP_ERR_HTTP_EAGAIN` 归类为超时，避免保留旧请求状态。网络切换也在采集任务中清理客户端；正常成功连接继续复用，认证与 429 冷却语义保留。
+
+UI 计时统一采用 64 位毫秒，图表与按键计时跨越约 49.7 天边界保持连续。旧 Ping 会话先解除身份再异步停止，迟到回调不会污染新网络历史。
+
+HTTP 恢复回归测试使用实际 `api_get` 和事件处理代码配合模拟传输状态，不连接真实控制台。测试通过、固件烧录校验以及启动后持续采集已经确认；实际断网恢复和本轮相机验收仍未完成。完整接口表、时效规则、首次配置和验收步骤以[主 README](../../README.md)为准。
